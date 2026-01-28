@@ -1,4 +1,5 @@
 name: Sync All APK & Push Telegram
+
 on:
   workflow_dispatch:
   schedule:
@@ -6,305 +7,113 @@ on:
 
 permissions:
   contents: write
+
 jobs:
   sync:
     runs-on: ubuntu-latest
-    # ... 后面所有 steps 保持不变
+
     steps:
       - name: Checkout 仓库代码
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
       - name: 安装必要工具
         run: |
           sudo apt-get update
           sudo apt-get install -y unzip jq coreutils opencc python3 python3-pip
           pip3 install requests
-# ────────────────────────────── FongMi（蜂蜜版）下载 ──────────────────────────────
-      - name: 下载 FongMi fongmi 分支 ZIP
+
+# ───────────────────── FongMi 蜂蜜版 ─────────────────────
+      - name: 下载 FongMi APK
         run: |
           curl -L -o fongmi.zip https://codeload.github.com/FongMi/Release/zip/refs/heads/fongmi
           unzip -q fongmi.zip
           mkdir -p apk/fongmi
           find Release-fongmi/apk -type f -name "*.apk" -exec cp {} apk/fongmi/ \;
-          echo "FongMi APK 已收集："
-          ls -lh apk/fongmi/
-      - name: 解析 FongMi JSON（获取版本和日志）
+
+      - name: 解析 FongMi 更新日志
         run: |
           curl -s -o leanback.json https://raw.githubusercontent.com/FongMi/Release/fongmi/apk/leanback.json
           curl -s -o mobile.json https://raw.githubusercontent.com/FongMi/Release/fongmi/apk/mobile.json
-          fongmi_version=$(jq -r '.name' leanback.json)
-          [ -z "$fongmi_version" ] && fongmi_version="未知版本"
-          fongmi_desc_leanback=$(jq -r '.desc' leanback.json | sed 's/^\* //g')
-          fongmi_desc_mobile=$(jq -r '.desc' mobile.json | sed 's/^\* //g')
-          fongmi_logs=$(echo -e "$fongmi_desc_leanback\n$fongmi_desc_mobile" \
-            | sort | uniq \
-            | sed 's/^/• /g' \
-            | opencc -c t2s.json)
-          fongmi_time=$(TZ=Asia/Shanghai date '+%Y/%m/%d %H:%M')
-          fongmi_caption=$(
-            printf "\n\n - 影视 · 蜂蜜版\n\n- 本次更新：\n%s\n\n - 当前版本：%s\n - 更新时间：%s" \
-            "$fongmi_logs" "$fongmi_version" "$fongmi_time"
-          )
-          echo "caption_fongmi<<EOF" >> $GITHUB_ENV
-          echo "$fongmi_caption" >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
-# ────────────────────────────── OK影视（标准版 + Pro版）下载 ──────────────────────────────
-      - name: 下载并收集 OK影视 APK 和 TXT
+          ver=$(jq -r '.name' leanback.json)
+          logs=$(jq -r '.desc' leanback.json mobile.json | sed 's/^\* //g' | sort -u | sed 's/^/• /g' | opencc -c t2s.json)
+          time=$(TZ=Asia/Shanghai date '+%Y/%m/%d %H:%M')
+          cat <<EOF >> $GITHUB_ENV
+caption_fongmi<<EOT
+
+ - 影视 · 蜂蜜版
+
+- 本次更新：
+$logs
+
+ - 当前版本：$ver
+ - 更新时间：$time
+EOT
+EOF
+
+# ───────────────────── OK影视（修正版） ─────────────────────
+      - name: 下载 OK影视 APK（支持无提取码）
         env:
           QUARK_COOKIE: ${{ secrets.QUARK_COOKIE }}
           QUARK_PASSCODE: ${{ secrets.QUARK_PASSCODE }}
         run: |
           mkdir -p apk/ok/pro apk/ok/standard
           python3 <<'EOF'
-import requests, json, os
+import os, requests, json
+
 headers = {
     'Cookie': os.environ['QUARK_COOKIE'],
-    'Content-Type': 'application/json',
-    'User-Agent': 'Mozilla/5.0'
+    'User-Agent': 'Mozilla/5.0',
+    'Content-Type': 'application/json'
 }
+
 pwd_id = 'cb0ee2b9ac64'
-passcode = os.environ.get('QUARK_PASSCODE', '')
-def get_token():
-    url = 'https://pan.quark.cn/api/share/v2/share/token'
-    data = {"pwd_id": pwd_id, "passcode": passcode}
+raw_passcode = os.environ.get('QUARK_PASSCODE', '')
+passcode = '' if raw_passcode.lower() in ('none', 'null', '') else raw_passcode
+
+def post(url, data):
     r = requests.post(url, headers=headers, data=json.dumps(data)).json()
     if r.get('code') != 0:
-        exit("获取token失败")
-    return r['data']['token'], r['data']['stoken']
-def list_files(fid, token, stoken):
-    url = 'https://pan.quark.cn/api/share/v2/share/list'
-    body = {"pwd_id": pwd_id, "token": token, "stoken": stoken, "pdir_fid": fid, "page":1, "count":100}
-    r = requests.post(url, headers=headers, data=json.dumps(body)).json()
-    if r.get('code') != 0:
-        exit("列出文件失败")
-    return r['data']['list']
-def download(fid, token, stoken, path):
-    url = 'https://pan.quark.cn/api/share/v2/share/download'
-    body = {"pwd_id": pwd_id, "stoken": stoken, "fid_list":[fid], "passcode": passcode}
-    r = requests.post(url, headers=headers, data=json.dumps(body)).json()
-    dl_url = r['data'][0]['download_url']
-    resp = requests.get(dl_url, headers=headers, stream=True)
-    with open(path,'wb') as f:
-        for chunk in resp.iter_content(1024):
-            f.write(chunk)
-token, stoken = get_token()
-root = list_files("0", token, stoken)
-pro_fid = [i['fid'] for i in root if i['file_name']=='OK影视Pro版' and i['dir']][0]
-standard_fid = [i['fid'] for i in root if i['file_name']=='OK影视标准版' and i['dir']][0]
-# Pro版
-pro_files = list_files(pro_fid, token, stoken)
-pro_apks = [i for i in pro_files if i['file_name'].endswith('.apk') and ('leanback-arm64_v8a' in i['file_name'] or 'leanback-armeabi_v7a' in i['file_name'] or 'mobile-arm64_v8a' in i['file_name'] or 'mobile-armeabi_v7a' in i['file_name'] or 'OK影视' in i['file_name'])]
-pro_txt = [i for i in pro_files if i['file_name'].endswith('.txt')][0]
-for f in pro_apks:
-    download(f['fid'], token, stoken, f"apk/ok/pro/{f['file_name']}")
-download(pro_txt['fid'], token, stoken, "apk/ok/pro.txt")
-# 标准版：自动取最大数字文件夹
-std_subs = list_files(standard_fid, token, stoken)
-num_folders = [i for i in std_subs if i['dir'] and i['file_name'].isdigit()]
-max_fid = max(num_folders, key=lambda x:int(x['file_name']))['fid']
-latest_std = list_files(max_fid, token, stoken)
-std_apks = [i for i in latest_std if i['file_name'].endswith('.apk') and ('mobile-arm64_v8a' in i['file_name'] or 'mobile-armeabi_v7a' in i['file_name'] or 'OK影视' in i['file_name'])]
-std_txt = [i for i in latest_std if i['file_name'].endswith('.txt')][0]
-for f in std_apks:
-    download(f['fid'], token, stoken, f"apk/ok/standard/{f['file_name']}")
-download(std_txt['fid'], token, stoken, "apk/ok/standard.txt")
+        raise SystemExit(r)
+    return r['data']
+
+token_data = post(
+    'https://pan.quark.cn/api/share/v2/share/token',
+    {"pwd_id": pwd_id, "passcode": passcode}
+)
+
+def list_dir(fid):
+    return post(
+        'https://pan.quark.cn/api/share/v2/share/list',
+        {"pwd_id": pwd_id, "token": token_data['token'], "stoken": token_data['stoken'], "pdir_fid": fid}
+    )['list']
+
+def download(fid, path):
+    d = post(
+        'https://pan.quark.cn/api/share/v2/share/download',
+        {"pwd_id": pwd_id, "fid_list": [fid], "stoken": token_data['stoken'], "passcode": passcode}
+    )[0]
+    r = requests.get(d['download_url'], stream=True)
+    with open(path, 'wb') as f:
+        for c in r.iter_content(8192):
+            f.write(c)
+
+root = list_dir("0")
+pro = next(i for i in root if i['file_name']=='OK影视Pro版')
+std = next(i for i in root if i['file_name']=='OK影视标准版')
+
+for f in list_dir(pro['fid']):
+    if f['file_name'].endswith('.apk'):
+        download(f['fid'], f"apk/ok/pro/{f['file_name']}")
+    if f['file_name'].endswith('.txt'):
+        download(f['fid'], "apk/ok/pro.txt")
+
+subs = [i for i in list_dir(std['fid']) if i['dir'] and i['file_name'].isdigit()]
+latest = max(subs, key=lambda x:int(x['file_name']))
+for f in list_dir(latest['fid']):
+    if f['file_name'].endswith('.apk'):
+        download(f['fid'], f"apk/ok/standard/{f['file_name']}")
+    if f['file_name'].endswith('.txt'):
+        download(f['fid'], "apk/ok/standard.txt")
 EOF
-# ────────────────────────────── 解析 OK影视 TXT ──────────────────────────────
-      - name: 解析 OK影视 TXT
-        run: |
-          # Pro
-          version_pro=$(head -n1 apk/ok/pro.txt)
-          desc_pro=$(tail -n +2 apk/ok/pro.txt | sed 's/^\* //g')
-          logs_pro=$(echo -e "$desc_pro" | sort | uniq | sed 's/^/• /g' | opencc -c t2s.json)
-          time_pro=$(TZ=Asia/Shanghai date '+%Y/%m/%d %H:%M')
-          caption_pro=$(
-            printf "\n\n - OK影视 Pro版\n\n- 本次更新：\n%s\n\n - 当前版本：%s\n - 更新时间：%s" \
-            "$logs_pro" "$version_pro" "$time_pro"
-          )
-          echo "caption_ok_pro<<EOF" >> $GITHUB_ENV
-          echo "$caption_pro" >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
-          # 标准版
-          version_std=$(head -n1 apk/ok/standard.txt)
-          desc_std=$(tail -n +2 apk/ok/standard.txt | sed 's/^\* //g')
-          logs_std=$(echo -e "$desc_std" | sort | uniq | sed 's/^/• /g' | opencc -c t2s.json)
-          time_std=$(TZ=Asia/Shanghai date '+%Y/%m/%d %H:%M')
-          caption_std=$(
-            printf "\n\n - OK影视 标准版\n\n- 本次更新：\n%s\n\n - 当前版本：%s\n - 更新时间：%s" \
-            "$logs_std" "$version_std" "$time_std"
-          )
-          echo "caption_ok_std<<EOF" >> $GITHUB_ENV
-          echo "$caption_std" >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
-# ────────────────────────────── hash 计算 & 更新检测 ──────────────────────────────
-      - name: 计算每个应用的 APK hash
-        id: hashes
-        run: |
-          # FongMi
-          if ls apk/fongmi/*.apk >/dev/null 2>&1; then
-            fongmi_hash=$(find apk/fongmi -type f -name "*.apk" -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)
-          else
-            fongmi_hash="no-apk-$(date +%s)"
-          fi
-          echo "fongmi_hash=$fongmi_hash" >> $GITHUB_OUTPUT
-          # OK Pro
-          if ls apk/ok/pro/*.apk >/dev/null 2>&1; then
-            ok_pro_hash=$(find apk/ok/pro -type f -name "*.apk" -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)
-          else
-            ok_pro_hash="no-apk-$(date +%s)"
-          fi
-          echo "ok_pro_hash=$ok_pro_hash" >> $GITHUB_OUTPUT
-          # OK Standard
-          if ls apk/ok/standard/*.apk >/dev/null 2>&1; then
-            ok_std_hash=$(find apk/ok/standard -type f -name "*.apk" -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)
-          else
-            ok_std_hash="no-apk-$(date +%s)"
-          fi
-          echo "ok_std_hash=$ok_std_hash" >> $GITHUB_OUTPUT
-      - name: 读取上一次 hash
-        id: last_hashes
-        run: |
-          fongmi_last=$(cat last_fongmi_hash.txt 2>/dev/null || echo "")
-          echo "fongmi_last=$fongmi_last" >> $GITHUB_OUTPUT
-          ok_pro_last=$(cat last_ok_pro_hash.txt 2>/dev/null || echo "")
-          echo "ok_pro_last=$ok_pro_last" >> $GITHUB_OUTPUT
-          ok_std_last=$(cat last_ok_std_hash.txt 2>/dev/null || echo "")
-          echo "ok_std_last=$ok_std_last" >> $GITHUB_OUTPUT
-      - name: 判断是否有更新
-        id: checks
-        run: |
-          # FongMi
-          if [ "${{ steps.hashes.outputs.fongmi_hash }}" = "${{ steps.last_hashes.outputs.fongmi_last }}" ]; then
-            echo "fongmi_changed=false" >> $GITHUB_OUTPUT
-          else
-            echo "fongmi_changed=true" >> $GITHUB_OUTPUT
-          fi
-          # OK Pro
-          if [ "${{ steps.hashes.outputs.ok_pro_hash }}" = "${{ steps.last_hashes.outputs.ok_pro_last }}" ]; then
-            echo "ok_pro_changed=false" >> $GITHUB_OUTPUT
-          else
-            echo "ok_pro_changed=true" >> $GITHUB_OUTPUT
-          fi
-          # OK Standard
-          if [ "${{ steps.hashes.outputs.ok_std_hash }}" = "${{ steps.last_hashes.outputs.ok_std_last }}" ]; then
-            echo "ok_std_changed=false" >> $GITHUB_OUTPUT
-          else
-            echo "ok_std_changed=true" >> $GITHUB_OUTPUT
-          fi
-# ────────────────────────────── 保存 hash & 提交 ──────────────────────────────
-      - name: 保存新 hash 并提交
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          changed=false
-          if [ "${{ steps.checks.outputs.fongmi_changed }}" = "true" ]; then
-            echo "${{ steps.hashes.outputs.fongmi_hash }}" > last_fongmi_hash.txt
-            git add last_fongmi_hash.txt
-            changed=true
-          fi
-          if [ "${{ steps.checks.outputs.ok_pro_changed }}" = "true" ]; then
-            echo "${{ steps.hashes.outputs.ok_pro_hash }}" > last_ok_pro_hash.txt
-            git add last_ok_pro_hash.txt
-            changed=true
-          fi
-          if [ "${{ steps.checks.outputs.ok_std_changed }}" = "true" ]; then
-            echo "${{ steps.hashes.outputs.ok_std_hash }}" > last_ok_std_hash.txt
-            git add last_ok_std_hash.txt
-            changed=true
-          fi
-          if [ "$changed" = "true" ]; then
-            git commit -m "update hash files (new APK)" || echo "无变化"
-            git push origin HEAD:${{ github.ref_name }}
-          fi
-# ────────────────────────────── 创建 Release ──────────────────────────────
-      - name: 生成 release tag
-        if: steps.checks.outputs.fongmi_changed == 'true' || steps.checks.outputs.ok_pro_changed == 'true' || steps.checks.outputs.ok_std_changed == 'true'
-        id: tag
-        run: |
-          tag="auto-$(date +'%Y%m%d-%H%M')"
-          echo "tag=$tag" >> $GITHUB_OUTPUT
-      - name: 创建 GitHub Release 并上传所有 APK
-        if: steps.checks.outputs.fongmi_changed == 'true' || steps.checks.outputs.ok_pro_changed == 'true' || steps.checks.outputs.ok_std_changed == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          git tag "${{ steps.tag.outputs.tag }}" || true
-          git push origin "${{ steps.tag.outputs.tag }}" || true
-          upload_files=""
-          if [ "${{ steps.checks.outputs.fongmi_changed }}" = "true" ]; then
-            upload_files+=" apk/fongmi/*.apk"
-          fi
-          if [ "${{ steps.checks.outputs.ok_pro_changed }}" = "true" ]; then
-            upload_files+=" apk/ok/pro/*.apk"
-          fi
-          if [ "${{ steps.checks.outputs.ok_std_changed }}" = "true" ]; then
-            upload_files+=" apk/ok/standard/*.apk"
-          fi
-          gh release create "${{ steps.tag.outputs.tag }}" \
-            $upload_files \
-            --title "All APK ${{ steps.tag.outputs.tag }}" \
-            --notes "自动同步更新，蜂蜜版 + OK影视标准版 + Pro版"
-# ────────────────────────────── Telegram 推送 ──────────────────────────────
-      - name: 推送到 Telegram
-        if: steps.checks.outputs.fongmi_changed == 'true' || steps.checks.outputs.ok_pro_changed == 'true' || steps.checks.outputs.ok_std_changed == 'true'
-        env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          CHAT_ID: ${{ secrets.CHAT_ID }}
-          BOT_API_BASE: ${{ secrets.BOT_API_BASE }}
-        run: |
-          # 函数：发送一个应用的 APK + caption（独立相册）
-          send_album() {
-            local app_name="$1"
-            local caption_var="$2"   # 如 caption_fongmi
-            local apk_dir="$3"       # 如 apk/fongmi
-            local changed_flag="$4"  # 如 ${{ steps.checks.outputs.fongmi_changed }}
-
-            if [ "$changed_flag" != "true" ]; then
-              echo "$app_name 无更新，跳过推送"
-              return
-            fi
-
-            # 收集文件
-            local files=($(ls -1 "$apk_dir"/*.apk 2>/dev/null))
-            if [ ${#files[@]} -ne 4 ]; then
-              echo "警告：$app_name APK 不完整 (${#files[@]} 个)，跳过"
-              return
-            fi
-
-            # 构建 media JSON
-            local media='['
-            for i in "${!files[@]}"; do
-              local base=$(basename "${files[$i]}")
-              if [ $i -eq 3 ]; then  # 最后一个文件放 caption
-                media+="{\"type\":\"document\",\"media\":\"attach://$base\",\"caption\":\"${!caption_var}\"}"
-              else
-                media+="{\"type\":\"document\",\"media\":\"attach://$base\"},"
-              fi
-            done
-            media+=']'
-
-            # 发送
-            local curl_cmd="curl -s -X POST \"$BOT_API_BASE/bot$BOT_TOKEN/sendMediaGroup\" \
-              -F chat_id=\"$CHAT_ID\" \
-              -F media=\"$media\""
-            for f in "${files[@]}"; do
-              local base=$(basename "$f")
-              curl_cmd+=" -F \"$base=@$f\""
-            done
-
-            local response=$(eval "$curl_cmd")
-            echo "$app_name 推送响应: $response"
-
-            if echo "$response" | grep -q '"ok":true'; then
-              echo "$app_name 推送成功"
-            else
-              echo "$app_name 推送失败"
-              # 可选：exit 1
-            fi
-          }
-
-          # 分别推送有更新的应用
-          send_album "FongMi 蜂蜜版"   "caption_fongmi"   "apk/fongmi"       "${{ steps.checks.outputs.fongmi_changed }}"
-          send_album "OK影视 Pro版"    "caption_ok_pro"   "apk/ok/pro"       "${{ steps.checks.outputs.ok_pro_changed }}"
-          send_album "OK影视 标准版"   "caption_ok_std"   "apk/ok/standard"  "${{ steps.checks.outputs.ok_std_changed }}"
